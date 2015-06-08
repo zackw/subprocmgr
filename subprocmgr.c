@@ -51,17 +51,12 @@
        cstring[]  argument vector
        cstring[]  environment vector
 
-   and the file descriptors passed must be organized as follows,
-   where M is n_fds from the first message:
-
-       fds[0]     mandatory: status pipe
-       fds[1..M]  optional: may be provided to subprocess
-                  (passing more than 3 of these is not useful)
+   The file descriptors passed, if any, are a simple array, referenced
+   by the "disposition of fd N in subprocess" fields of the message.
 
    'tag' is an arbitrary, invoker-selected value used to distinguish
-   processes in messages written to the status pipe.  It is the invoker's
-   responsibility not to reuse tags while their associated processes are
-   still alive.
+   processes in status messages.  It is the invoker's responsibility
+   not to reuse tags while their associated processes are still alive.
 
    'flags' is currently reserved and must be all-bits-zero.
 
@@ -70,8 +65,8 @@
 
        -1         Inherit from parent.
        0          fd 0:   Open /dev/null for read.
-                  fd 1/2: Forward output via the status pipe.
-       k ∈ [1,M]  Use passed fd with index k.
+                  fd 1/2: Forward output.
+       k >= 1     Use passed fd with index (k-1).
 
    Currently it is not possible to supply higher-numbered file descriptors
    to the child.
@@ -84,21 +79,16 @@
    respective vectors, with two special cases: If the argument count
    is zero, the executable name will be reused as the sole entry in
    the argument vector passed to execve(2).  If the environment
-   variable count is -1 (== 0xFFFF_FFFF), any environment vector
-   provided will be ignored, and the new process will inherit its
+   variable count is -1 (== 0xFFFF_FFFF), the environment vector is
+   expected to be empty, and the new process will inherit its
    environment from the parent (i.e. this program).
 
    (If the environment variable count is zero, the new process will
    recieve a completely empty environment.)
 
-   An error message will be written to stderr, and all received data
-   will be discarded, if no status pipe is received.  Otherwise, all
-   errors encountered during creation of the child process (including
-   errors due to ill-formed control messages) will be reported via the
-   status pipe.
-
-   Status pipe messages consist of 4 32-bit integers followed by zero
-   or more bytes of data:
+   This program sends "status messages" back to the invoker via the
+   control socket.  These messages consist of 4 unsigned 32-bit
+   integers followed by zero or more bytes of data:
 
        tag
        status
@@ -106,10 +96,9 @@
        len
 
    'tag' is always the tag provided with the message that created the
-   process (this permits the same status pipe to be used for several
-   processes), and 'len' always indicates how many bytes of data
-   follow.  The meaning of 'value' depends on 'status', which is one
-   of the following possible codes:
+   process, and 'len' always indicates how many bytes of data follow.
+   The meaning of 'value' depends on 'status', which is one of the
+   following possible codes:
 
        0    The control message was ill-formed.  'value' is zero,
             and the data is a human-readable message describing the problem.
@@ -129,10 +118,7 @@
        4    Process has closed an output channel. 'value' will be 1 for
             stdout or '2' for stderr.  No data.
 
-       5    Process has exited.  'value' is the wait status, and the
-            data is a human-readable message decoding the wait status
-            (this is kind of a pain to do on the Python side, due to
-            the lack of strsignal()).
+       5    Process has exited.  'value' is the wait status.  No data.
 
    For any given process, this program guarantees to emit messages in
    the following order: First, exactly one message with status 0, 1,
@@ -144,28 +130,31 @@
    pipe".  (There is no ordering between stdout and stderr.)  Finally,
    exactly one message with status 5.
 
-   When the control socket is closed, this program will send SIGTERM
-   to all processes that are still running, and start a five-second
-   timer.  It will continue to generate status-pipe messages until
-   there are no more messages to generate (i.e. all children have
-   exited), and then it will exit itself.  If the timer expires, any
-   surviving processes receive a SIGKILL and status pipe message
+   When EOF is received on the control socket, this program will send
+   SIGTERM to all processes that are still running, and start a
+   five-second timer.  It will continue to generate status messages
+   until there are no more messages to generate (i.e. all children
+   have exited), and then it will exit itself.  If the timer expires,
+   any surviving processes receive a SIGKILL and status message
    generation continues.
 
-   If this program ever receives a write error on a status pipe, it
-   will send SIGTERM to the associated subprocess, and (if it is still
-   running) SIGKILL five seconds later.  All further output from that
-   subprocess, and its wait status, will be read and discarded.
+   If this program ever receives a write error on the control socket,
+   all further output from subprocesses, and their wait statuses,
+   will be read and discarded.  This condition does *not* cause running
+   subprocesses to be terminated.
 
-   If this program receives SIGHUP, SIGINT, SIGQUIT, or SIGTERM, it
-   will echo that signal to all processes that are still running,
-   close its end of the control socket, and then behave as described
-   above for "when the control socket is closed".  If this program
-   receives SIGILL, SIGFPE, SIGBUS, SIGSEGV, or SIGABRT, it will
-   immediately send SIGKILL to all processes that are still running,
-   and then crash as usual for that signal.  All other signals are
-   ignored.
+   If this program ever receives SIGHUP, SIGINT, SIGQUIT, SIGALRM,
+   SIGTERM, SIGVTALRM, SIGXCPU, SIGXFSZ, or SIGPWR, it will behave as
+   if it had received EOF on the control socket, except that the
+   initial signal sent is the same as was received.  If this program
+   receives SIGILL, SIGABRT, SIGFPE, SIGBUS, SIGSEGV, SIGSYS, or
+   SIGTRAP, it will immediately send SIGKILL to all processes that are
+   still running, and then crash as usual for that signal.
+   The signals that stop processes are allowed to behave normally.
+   All other signals are ignored.
 
+   (Child processes receive whatever signal mask this program's parent
+   provided it.)
  */
 
 /* Portability note: this program makes use of many POSIX.1-2008
